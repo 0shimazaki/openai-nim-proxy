@@ -59,101 +59,45 @@ app.get('/v1/models', (req, res) => {
 // Chat completions endpoint (main proxy)
 app.post('/v1/chat/completions', async (req, res) => {
   try {
-    const { 
-      model, 
-      messages, 
-      temperature, 
-      max_tokens, 
-      stream,
-      top_p,
-      frequency_penalty,
-      presence_penalty 
-    } = req.body;
-
-    // 1. Defend against malformed pings or missing arrays
-    if (!messages || !Array.isArray(messages)) {
-      return res.status(400).json({
-        error: { message: "Invalid request body or missing 'messages' array.", type: "invalid_request_error", code: 400 }
-      });
-    }
+    const { model, messages, temperature, max_tokens, stream } = req.body;
     
     // Smart model selection with fallback
-    let nimModel = model ? MODEL_MAPPING[model] : undefined;
-    if (!nimModel && model) {
+    let nimModel = MODEL_MAPPING[model];
+    if (!nimModel) {
       try {
-        // Changed to use a separate variable to avoid shadowing the route's 'res' object
-        const verificationCheck = await axios.post(`${NIM_API_BASE}/chat/completions`, {
+        await axios.post(`${NIM_API_BASE}/chat/completions`, {
           model: model,
           messages: [{ role: 'user', content: 'test' }],
           max_tokens: 1
         }, {
           headers: { 'Authorization': `Bearer ${NIM_API_KEY}`, 'Content-Type': 'application/json' },
           validateStatus: (status) => status < 500
+        }).then(res => {
+          if (res.status >= 200 && res.status < 300) {
+            nimModel = model;
+          }
         });
-        
-        if (verificationCheck.status >= 200 && verificationCheck.status < 300) {
-          nimModel = model;
-        }
       } catch (e) {}
-    }
-
-    // Secondary fallback routine if the model isn't mapped or verified
-    if (!nimModel) {
-      const modelLower = (model || '').toLowerCase();
-      if (modelLower.includes('gpt-4') || modelLower.includes('claude-opus') || modelLower.includes('405b')) {
-        nimModel = 'meta/llama-3.1-405b-instruct';
-      } else if (modelLower.includes('claude') || modelLower.includes('gemini') || modelLower.includes('70b')) {
-        nimModel = 'meta/llama-3.1-70b-instruct';
-      } else {
-        nimModel = 'meta/llama-3.1-8b-instruct';
-      }
-    }
-    
-    // Prepare parameter overrides and dynamic configurations
-    let finalMessages = [...messages];
-    let finalTemperature = temperature;
-    let finalTopP = top_p;
-    let finalFrequencyPenalty = frequency_penalty;
-    let finalPresencePenalty = presence_penalty;
-    let finalExtraBody = ENABLE_THINKING_MODE ? { chat_template_kwargs: { thinking: true } } : undefined;
-
-    // ⚡ MODEL SPECIFIC ROLEPLAY TUNING FOR DEEPSEEK V4 FLASH
-    if (nimModel === 'deepseek-ai/deepseek-v4-flash') {
-      if (finalTemperature === undefined) finalTemperature = 1.05;
-      if (finalTopP === undefined) finalTopP = 0.92;
-      if (finalFrequencyPenalty === undefined) finalFrequencyPenalty = 0.15;
-      if (finalPresencePenalty === undefined) finalPresencePenalty = 0.05;
-
-      finalExtraBody = {
-        repetition_penalty: 1.04,
-        chat_template_kwargs: { thinking: false }
-      };
-
-      const styleGuardrail = `\n\n[Writing Style Instructions: Write with concrete, visceral actions rather than abstract over-analysis. Avoid internal indecision loops, rhetorical questions, and safe antitheses (e.g., "You are either a saint or a monster," "Time seemed to both stop and fly"). Do not narrate what a character 'might' do or 'hasn't decided' to do—commit to immediate, observable actions, dialogue, and environment changes.]`;
       
-      const systemIdx = finalMessages.findIndex(msg => msg.role === 'system');
-      if (systemIdx !== -1) {
-        finalMessages[systemIdx] = {
-          ...finalMessages[systemIdx],
-          content: finalMessages[systemIdx].content + styleGuardrail
-        };
-      } else {
-        finalMessages.unshift({ role: 'system', content: styleGuardrail.trim() });
+      if (!nimModel) {
+        const modelLower = model.toLowerCase();
+        if (modelLower.includes('gpt-4') || modelLower.includes('claude-opus') || modelLower.includes('405b')) {
+          nimModel = 'meta/llama-3.1-405b-instruct';
+        } else if (modelLower.includes('claude') || modelLower.includes('gemini') || modelLower.includes('70b')) {
+          nimModel = 'meta/llama-3.1-70b-instruct';
+        } else {
+          nimModel = 'meta/llama-3.1-8b-instruct';
+        }
       }
-    } else {
-      if (finalTemperature === undefined) finalTemperature = 0.6;
     }
     
     // Transform OpenAI request to NIM format
     const nimRequest = {
       model: nimModel,
-      messages: finalMessages,
-      temperature: finalTemperature,
-      top_p: finalTopP,
-      frequency_penalty: finalFrequencyPenalty,
-      presence_penalty: finalPresencePenalty,
+      messages: messages,
+      temperature: temperature || 0.6,
       max_tokens: max_tokens || 9024,
-      extra_body: finalExtraBody,
+      extra_body: ENABLE_THINKING_MODE ? { chat_template_kwargs: { thinking: true } } : undefined,
       stream: stream || false
     };
     
@@ -167,6 +111,7 @@ app.post('/v1/chat/completions', async (req, res) => {
     });
     
     if (stream) {
+      // Handle streaming response with reasoning
       res.setHeader('Content-Type', 'text/event-stream');
       res.setHeader('Cache-Control', 'no-cache');
       res.setHeader('Connection', 'keep-alive');
@@ -175,70 +120,65 @@ app.post('/v1/chat/completions', async (req, res) => {
       let reasoningStarted = false;
       
       response.data.on('data', (chunk) => {
-        // 2. Encapsulate stream processing in its own try/catch to protect the core Node process
-        try {
-          buffer += chunk.toString();
-          const lines = buffer.split('\n');
-          buffer = lines.pop() || '';
-          
-          lines.forEach(line => {
-            if (line.startsWith('data: ')) {
-              if (line.includes('[DONE]')) {
-                res.write(line + '\n');
-                return;
-              }
-              
-              try {
-                const data = JSON.parse(line.slice(6));
-                if (data.choices?.[0]?.delta) {
-                  const reasoning = data.choices[0].delta.reasoning_content;
-                  const content = data.choices[0].delta.content;
+        buffer += chunk.toString();
+        const lines = buffer.split('\n');
+        buffer = lines.pop() || '';
+        
+        lines.forEach(line => {
+          if (line.startsWith('data: ')) {
+            if (line.includes('[DONE]')) {
+              res.write(line + '\n');
+              return;
+            }
+            
+            try {
+              const data = JSON.parse(line.slice(6));
+              if (data.choices?.[0]?.delta) {
+                const reasoning = data.choices[0].delta.reasoning_content;
+                const content = data.choices[0].delta.content;
+                
+                if (SHOW_REASONING) {
+                  let combinedContent = '';
                   
-                  if (SHOW_REASONING) {
-                    let combinedContent = '';
-                    
-                    if (reasoning && !reasoningStarted) {
-                      combinedContent = '<think>\n' + reasoning;
-                      reasoningStarted = true;
-                    } else if (reasoning) {
-                      combinedContent = reasoning;
-                    }
-                    
-                    if (content && reasoningStarted) {
-                      combinedContent += '</think>\n\n' + content;
-                      reasoningStarted = false;
-                    } else if (content) {
-                      combinedContent += content;
-                    }
-                    
-                    if (combinedContent) {
-                      data.choices[0].delta.content = combinedContent;
-                      delete data.choices[0].delta.reasoning_content;
-                    }
-                  } else {
-                    if (content) {
-                      data.choices[0].delta.content = content;
-                    } else {
-                      data.choices[0].delta.content = '';
-                    }
+                  if (reasoning && !reasoningStarted) {
+                    combinedContent = '<think>\n' + reasoning;
+                    reasoningStarted = true;
+                  } else if (reasoning) {
+                    combinedContent = reasoning;
+                  }
+                  
+                  if (content && reasoningStarted) {
+                    combinedContent += '</think>\n\n' + content;
+                    reasoningStarted = false;
+                  } else if (content) {
+                    combinedContent += content;
+                  }
+                  
+                  if (combinedContent) {
+                    data.choices[0].delta.content = combinedContent;
                     delete data.choices[0].delta.reasoning_content;
                   }
+                } else {
+                  if (content) {
+                    data.choices[0].delta.content = content;
+                  } else {
+                    data.choices[0].delta.content = '';
+                  }
+                  delete data.choices[0].delta.reasoning_content;
                 }
-                res.write(`data: ${JSON.stringify(data)}\n\n`);
-              } catch (e) {
-                res.write(line + '\n');
               }
+              res.write(`data: ${JSON.stringify(data)}\n\n`);
+            } catch (e) {
+              res.write(line + '\n');
             }
-          });
-        } catch (streamError) {
-          console.error('Runtime error parsing active stream chunk:', streamError.message);
-        }
+          }
+        });
       });
       
       response.data.on('end', () => res.end());
       response.data.on('error', (err) => {
-        console.error('Stream pipeline hardware error:', err);
-        if (!res.headersSent) res.end();
+        console.error('Stream error:', err);
+        res.end();
       });
     } else {
       // Transform NIM response to OpenAI format with reasoning
@@ -246,7 +186,7 @@ app.post('/v1/chat/completions', async (req, res) => {
         id: `chatcmpl-${Date.now()}`,
         object: 'chat.completion',
         created: Math.floor(Date.now() / 1000),
-        model: model || 'unspecified-model',
+        model: model,
         choices: response.data.choices.map(choice => {
           let fullContent = choice.message?.content || '';
           
@@ -274,16 +214,15 @@ app.post('/v1/chat/completions', async (req, res) => {
     }
     
   } catch (error) {
-    console.error('Proxy intercept error:', error.message);
-    if (!res.headersSent) {
-      res.status(error.response?.status || 500).json({
-        error: {
-          message: error.message || 'Internal proxy execution error',
-          type: 'invalid_request_error',
-          code: error.response?.status || 500
-        }
-      });
-    }
+    console.error('Proxy error:', error.message);
+    
+    res.status(error.response?.status || 500).json({
+      error: {
+        message: error.message || 'Internal server error',
+        type: 'invalid_request_error',
+        code: error.response?.status || 500
+      }
+    });
   }
 });
 
@@ -291,19 +230,16 @@ app.post('/v1/chat/completions', async (req, res) => {
 app.all('*', (req, res) => {
   res.status(404).json({
     error: {
-      message: `Endpoint ${req.path} not found. Ensure your client app hits /v1/chat/completions with a POST request.`,
+      message: `Endpoint ${req.path} not found`,
       type: 'invalid_request_error',
       code: 404
     }
   });
 });
 
-// 3. Prevent listener execution on Vercel deployment infrastructures
-if (!process.env.VERCEL) {
-  app.listen(PORT, () => {
-    console.log(`OpenAI to NVIDIA NIM Proxy running locally on port ${PORT}`);
-  });
-}
-
-// Export the module app configuration natively for serverless environments
-module.exports = app;
+app.listen(PORT, () => {
+  console.log(`OpenAI to NVIDIA NIM Proxy running on port ${PORT}`);
+  console.log(`Health check: http://localhost:${PORT}/health`);
+  console.log(`Reasoning display: ${SHOW_REASONING ? 'ENABLED' : 'DISABLED'}`);
+  console.log(`Thinking mode: ${ENABLE_THINKING_MODE ? 'ENABLED' : 'DISABLED'}`);
+});
