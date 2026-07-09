@@ -115,7 +115,7 @@ app.post('/v1/chat/completions', async (req, res) => {
     let finalTopP = top_p;
     let finalFrequencyPenalty = frequency_penalty;
     let finalPresencePenalty = presence_penalty;
-    let finalExtraBody = ENABLE_THINKING_MODE ? { chat_template_kwargs: { thinking: true } } : undefined;
+    let finalRepetitionPenalty = undefined;
 
     // ⚡ MODEL SPECIFIC ROLEPLAY TUNING FOR DEEPSEEK V4 FLASH
     if (nimModel === 'deepseek-ai/deepseek-v4-flash') {
@@ -124,10 +124,7 @@ app.post('/v1/chat/completions', async (req, res) => {
       if (finalFrequencyPenalty === undefined) finalFrequencyPenalty = 0.15;
       if (finalPresencePenalty === undefined) finalPresencePenalty = 0.05;
 
-      finalExtraBody = {
-        repetition_penalty: 1.04,
-        chat_template_kwargs: { thinking: false }
-      };
+      finalRepetitionPenalty = 1.04;
 
       const styleGuardrail = `\n\n[Writing Style Instructions: Write with concrete, visceral actions rather than abstract over-analysis. Avoid internal indecision loops, rhetorical questions, and safe antitheses (e.g., "You are either a saint or a monster," "Time seemed to both stop and fly"). Do not narrate what a character 'might' do or 'hasn't decided' to do—commit to immediate, observable actions, dialogue, and environment changes.]`;
       
@@ -153,8 +150,8 @@ app.post('/v1/chat/completions', async (req, res) => {
       frequency_penalty: finalFrequencyPenalty,
       presence_penalty: finalPresencePenalty,
       max_tokens: max_tokens || 9024,
-      extra_body: finalExtraBody,
-      stream: stream || false
+      stream: stream || false,
+      ...(finalRepetitionPenalty && { repetition_penalty: finalRepetitionPenalty })
     };
     
     // Make request to NVIDIA NIM API
