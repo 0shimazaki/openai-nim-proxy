@@ -151,9 +151,9 @@ app.post('/v1/chat/completions', async (req, res) => {
       presence_penalty: finalPresencePenalty,
       max_tokens: max_tokens || 9024,
       stream: stream || false,
+      reasoning_effort: ENABLE_THINKING_MODE ? "high" : "off",
       chat_template_kwargs: { 
-        thinking: ENABLE_THINKING_MODE, 
-        enable_thinking: ENABLE_THINKING_MODE 
+        thinking: ENABLE_THINKING_MODE 
       },
       ...(finalRepetitionPenalty && { repetition_penalty: finalRepetitionPenalty })
     };
