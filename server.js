@@ -81,7 +81,6 @@ app.post('/v1/chat/completions', async (req, res) => {
     let nimModel = model ? MODEL_MAPPING[model] : undefined;
     if (!nimModel && model) {
       try {
-        // Changed to use a separate variable to avoid shadowing the route's 'res' object
         const verificationCheck = await axios.post(`${NIM_API_BASE}/chat/completions`, {
           model: model,
           messages: [{ role: 'user', content: 'test' }],
@@ -117,7 +116,7 @@ app.post('/v1/chat/completions', async (req, res) => {
     let finalPresencePenalty = presence_penalty;
     let finalRepetitionPenalty = undefined;
 
-    // ⚡ MODEL SPECIFIC ROLEPLAY TUNING FOR DEEPSEEK V4 FLASH
+    // ⚡ MODEL SPECIFIC CONFIGURATION ADJUSTMENTS FOR DEEPSEEK V4 FLASH
     if (nimModel === 'deepseek-ai/deepseek-v4-flash') {
       if (finalTemperature === undefined) finalTemperature = 1.05;
       if (finalTopP === undefined) finalTopP = 0.92;
@@ -125,18 +124,6 @@ app.post('/v1/chat/completions', async (req, res) => {
       if (finalPresencePenalty === undefined) finalPresencePenalty = 0.05;
 
       finalRepetitionPenalty = 1.04;
-
-      const styleGuardrail = `\n\n[Writing Style Instructions: Write with concrete, visceral actions rather than abstract over-analysis. Avoid internal indecision loops, rhetorical questions, and safe antitheses (e.g., "You are either a saint or a monster," "Time seemed to both stop and fly"). Do not narrate what a character 'might' do or 'hasn't decided' to do—commit to immediate, observable actions, dialogue, and environment changes.]`;
-      
-      const systemIdx = finalMessages.findIndex(msg => msg.role === 'system');
-      if (systemIdx !== -1) {
-        finalMessages[systemIdx] = {
-          ...finalMessages[systemIdx],
-          content: finalMessages[systemIdx].content + styleGuardrail
-        };
-      } else {
-        finalMessages.unshift({ role: 'system', content: styleGuardrail.trim() });
-      }
     } else {
       if (finalTemperature === undefined) finalTemperature = 0.6;
     }
@@ -151,7 +138,10 @@ app.post('/v1/chat/completions', async (req, res) => {
       presence_penalty: finalPresencePenalty,
       max_tokens: max_tokens || 9024,
       stream: stream || false,
-      ...(ENABLE_THINKING_MODE && { chat_template_kwargs: { thinking: true, reasoning_effort: "high" } }),
+      chat_template_kwargs: { 
+        thinking: ENABLE_THINKING_MODE, 
+        ...(ENABLE_THINKING_MODE && { reasoning_effort: "high" })
+      },
       ...(finalRepetitionPenalty && { repetition_penalty: finalRepetitionPenalty })
     };
     
@@ -171,10 +161,9 @@ app.post('/v1/chat/completions', async (req, res) => {
       
       let buffer = '';
       let reasoningStarted = false;
-      let insideRawThinkBlock = false; // Tracks hidden inline raw thought fragments
+      let insideRawThinkBlock = false;
       
       response.data.on('data', (chunk) => {
-        // 2. Encapsulate stream processing in its own try/catch to protect the core Node process
         try {
           buffer += chunk.toString();
           const lines = buffer.split('\n');
@@ -215,7 +204,6 @@ app.post('/v1/chat/completions', async (req, res) => {
                       delete data.choices[0].delta.reasoning_content;
                     }
                   } else {
-                    // Modern deep filtering strategy to drop raw injected text thinking data
                     delete data.choices[0].delta.reasoning_content;
                     
                     if (content.includes('<think>')) {
@@ -228,7 +216,7 @@ app.post('/v1/chat/completions', async (req, res) => {
                     }
                     
                     if (insideRawThinkBlock) {
-                      return; // Drop reasoning chunks entirely
+                      return;
                     }
                     
                     if (content) {
@@ -255,7 +243,6 @@ app.post('/v1/chat/completions', async (req, res) => {
         if (!res.headersSent) res.end();
       });
     } else {
-      // Transform NIM response to OpenAI format with reasoning
       const openaiResponse = {
         id: `chatcmpl-${Date.now()}`,
         object: 'chat.completion',
@@ -267,7 +254,6 @@ app.post('/v1/chat/completions', async (req, res) => {
           if (SHOW_REASONING && choice.message?.reasoning_content) {
             fullContent = '<think>\n' + choice.message.reasoning_content + '\n</think>\n\n' + fullContent;
           } else if (!SHOW_REASONING) {
-            // Scrub inline text think loops if present in raw non-streamed response
             fullContent = fullContent.replace(/<think>[\s\S]*?<\/think>/g, '').trim();
           }
           
@@ -304,7 +290,6 @@ app.post('/v1/chat/completions', async (req, res) => {
   }
 });
 
-// Catch-all for unsupported endpoints
 app.all('*', (req, res) => {
   res.status(404).json({
     error: {
@@ -315,12 +300,10 @@ app.all('*', (req, res) => {
   });
 });
 
-// 3. Prevent listener execution on Vercel deployment infrastructures
 if (!process.env.VERCEL) {
   app.listen(PORT, () => {
     console.log(`OpenAI to NVIDIA NIM Proxy running locally on port ${PORT}`);
   });
 }
 
-// Export the module app configuration natively for serverless environments
 module.exports = app;
