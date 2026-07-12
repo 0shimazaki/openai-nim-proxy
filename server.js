@@ -81,6 +81,7 @@ app.post('/v1/chat/completions', async (req, res) => {
     let nimModel = model ? MODEL_MAPPING[model] : undefined;
     if (!nimModel && model) {
       try {
+        // Changed to use a separate variable to avoid shadowing the route's 'res' object
         const verificationCheck = await axios.post(`${NIM_API_BASE}/chat/completions`, {
           model: model,
           messages: [{ role: 'user', content: 'test' }],
@@ -116,17 +117,7 @@ app.post('/v1/chat/completions', async (req, res) => {
     let finalPresencePenalty = presence_penalty;
     let finalRepetitionPenalty = undefined;
 
-    // ⚡ MODEL SPECIFIC CONFIGURATION ADJUSTMENTS FOR DEEPSEEK V4 FLASH
-    if (nimModel === 'deepseek-ai/deepseek-v4-flash') {
-      if (finalTemperature === undefined) finalTemperature = 1.05;
-      if (finalTopP === undefined) finalTopP = 0.92;
-      if (finalFrequencyPenalty === undefined) finalFrequencyPenalty = 0.15;
-      if (finalPresencePenalty === undefined) finalPresencePenalty = 0.05;
-
-      finalRepetitionPenalty = 1.04;
-    } else {
-      if (finalTemperature === undefined) finalTemperature = 0.6;
-    }
+    if (finalTemperature === undefined) finalTemperature = 0.6;
     
     // Transform OpenAI request to NIM format
     const nimRequest = {
@@ -138,10 +129,6 @@ app.post('/v1/chat/completions', async (req, res) => {
       presence_penalty: finalPresencePenalty,
       max_tokens: max_tokens || 9024,
       stream: stream || false,
-      chat_template_kwargs: { 
-        thinking: ENABLE_THINKING_MODE, 
-        ...(ENABLE_THINKING_MODE && { reasoning_effort: "high" })
-      },
       ...(finalRepetitionPenalty && { repetition_penalty: finalRepetitionPenalty })
     };
     
@@ -161,9 +148,9 @@ app.post('/v1/chat/completions', async (req, res) => {
       
       let buffer = '';
       let reasoningStarted = false;
-      let insideRawThinkBlock = false;
       
       response.data.on('data', (chunk) => {
+        // 2. Encapsulate stream processing in its own try/catch to protect the core Node process
         try {
           buffer += chunk.toString();
           const lines = buffer.split('\n');
@@ -180,7 +167,7 @@ app.post('/v1/chat/completions', async (req, res) => {
                 const data = JSON.parse(line.slice(6));
                 if (data.choices?.[0]?.delta) {
                   const reasoning = data.choices[0].delta.reasoning_content;
-                  let content = data.choices[0].delta.content || '';
+                  const content = data.choices[0].delta.content;
                   
                   if (SHOW_REASONING) {
                     let combinedContent = '';
@@ -204,26 +191,12 @@ app.post('/v1/chat/completions', async (req, res) => {
                       delete data.choices[0].delta.reasoning_content;
                     }
                   } else {
-                    delete data.choices[0].delta.reasoning_content;
-                    
-                    if (content.includes('<think>')) {
-                      insideRawThinkBlock = true;
-                      content = content.split('<think>')[1] || '';
-                    }
-                    if (content.includes('</think>')) {
-                      insideRawThinkBlock = false;
-                      content = content.split('</think>')[1] || '';
-                    }
-                    
-                    if (insideRawThinkBlock) {
-                      return;
-                    }
-                    
                     if (content) {
                       data.choices[0].delta.content = content;
                     } else {
-                      return;
+                      data.choices[0].delta.content = '';
                     }
+                    delete data.choices[0].delta.reasoning_content;
                   }
                 }
                 res.write(`data: ${JSON.stringify(data)}\n\n`);
@@ -243,6 +216,7 @@ app.post('/v1/chat/completions', async (req, res) => {
         if (!res.headersSent) res.end();
       });
     } else {
+      // Transform NIM response to OpenAI format with reasoning
       const openaiResponse = {
         id: `chatcmpl-${Date.now()}`,
         object: 'chat.completion',
@@ -253,8 +227,6 @@ app.post('/v1/chat/completions', async (req, res) => {
           
           if (SHOW_REASONING && choice.message?.reasoning_content) {
             fullContent = '<think>\n' + choice.message.reasoning_content + '\n</think>\n\n' + fullContent;
-          } else if (!SHOW_REASONING) {
-            fullContent = fullContent.replace(/<think>[\s\S]*?<\/think>/g, '').trim();
           }
           
           return {
@@ -290,6 +262,7 @@ app.post('/v1/chat/completions', async (req, res) => {
   }
 });
 
+// Catch-all for unsupported endpoints
 app.all('*', (req, res) => {
   res.status(404).json({
     error: {
@@ -300,10 +273,12 @@ app.all('*', (req, res) => {
   });
 });
 
+// 3. Prevent listener execution on Vercel deployment infrastructures
 if (!process.env.VERCEL) {
   app.listen(PORT, () => {
     console.log(`OpenAI to NVIDIA NIM Proxy running locally on port ${PORT}`);
   });
 }
 
+// Export the module app configuration natively for serverless environments
 module.exports = app;
