@@ -151,6 +151,7 @@ app.post('/v1/chat/completions', async (req, res) => {
       presence_penalty: finalPresencePenalty,
       max_tokens: max_tokens || 9024,
       stream: stream || false,
+      chat_template_kwargs: { thinking: ENABLE_THINKING_MODE },
       ...(finalRepetitionPenalty && { repetition_penalty: finalRepetitionPenalty })
     };
     
@@ -215,10 +216,10 @@ app.post('/v1/chat/completions', async (req, res) => {
                   } else {
                     if (content) {
                       data.choices[0].delta.content = content;
+                      delete data.choices[0].delta.reasoning_content;
                     } else {
-                      data.choices[0].delta.content = '';
+                      return;
                     }
-                    delete data.choices[0].delta.reasoning_content;
                   }
                 }
                 res.write(`data: ${JSON.stringify(data)}\n\n`);
