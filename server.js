@@ -151,10 +151,7 @@ app.post('/v1/chat/completions', async (req, res) => {
       presence_penalty: finalPresencePenalty,
       max_tokens: max_tokens || 9024,
       stream: stream || false,
-      reasoning_effort: ENABLE_THINKING_MODE ? "high" : "off",
-      chat_template_kwargs: { 
-        thinking: ENABLE_THINKING_MODE 
-      },
+      ...(ENABLE_THINKING_MODE && { chat_template_kwargs: { thinking: true, reasoning_effort: "high" } }),
       ...(finalRepetitionPenalty && { repetition_penalty: finalRepetitionPenalty })
     };
     
@@ -174,6 +171,7 @@ app.post('/v1/chat/completions', async (req, res) => {
       
       let buffer = '';
       let reasoningStarted = false;
+      let insideRawThinkBlock = false; // Tracks hidden inline raw thought fragments
       
       response.data.on('data', (chunk) => {
         // 2. Encapsulate stream processing in its own try/catch to protect the core Node process
@@ -193,7 +191,7 @@ app.post('/v1/chat/completions', async (req, res) => {
                 const data = JSON.parse(line.slice(6));
                 if (data.choices?.[0]?.delta) {
                   const reasoning = data.choices[0].delta.reasoning_content;
-                  const content = data.choices[0].delta.content;
+                  let content = data.choices[0].delta.content || '';
                   
                   if (SHOW_REASONING) {
                     let combinedContent = '';
@@ -217,9 +215,24 @@ app.post('/v1/chat/completions', async (req, res) => {
                       delete data.choices[0].delta.reasoning_content;
                     }
                   } else {
+                    // Modern deep filtering strategy to drop raw injected text thinking data
+                    delete data.choices[0].delta.reasoning_content;
+                    
+                    if (content.includes('<think>')) {
+                      insideRawThinkBlock = true;
+                      content = content.split('<think>')[1] || '';
+                    }
+                    if (content.includes('</think>')) {
+                      insideRawThinkBlock = false;
+                      content = content.split('</think>')[1] || '';
+                    }
+                    
+                    if (insideRawThinkBlock) {
+                      return; // Drop reasoning chunks entirely
+                    }
+                    
                     if (content) {
                       data.choices[0].delta.content = content;
-                      delete data.choices[0].delta.reasoning_content;
                     } else {
                       return;
                     }
@@ -253,6 +266,9 @@ app.post('/v1/chat/completions', async (req, res) => {
           
           if (SHOW_REASONING && choice.message?.reasoning_content) {
             fullContent = '<think>\n' + choice.message.reasoning_content + '\n</think>\n\n' + fullContent;
+          } else if (!SHOW_REASONING) {
+            // Scrub inline text think loops if present in raw non-streamed response
+            fullContent = fullContent.replace(/<think>[\s\S]*?<\/think>/g, '').trim();
           }
           
           return {
