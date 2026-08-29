@@ -14,13 +14,10 @@ app.use(express.json());
 const NIM_API_BASE = process.env.NIM_API_BASE || 'https://integrate.api.nvidia.com/v1';
 const NIM_API_KEY = process.env.NIM_API_KEY;
 
-// 🔥 REASONING DISPLAY TOGGLE - Shows/hides reasoning in output
-const SHOW_REASONING = false; // Set to true to show reasoning with <think> tags
+// 🔥 REASONING DISPLAY TOGGLE
+const SHOW_REASONING = false; // Set to true to format reasoning with <think> tags
 
-// 🔥 THINKING MODE TOGGLE - Enables thinking for specific models that support it
-const ENABLE_THINKING_MODE = false; // Set to true to enable chat_template_kwargs thinking parameter
-
-// Model mapping (adjust based on available NIM models)
+// Model mapping
 const MODEL_MAPPING = {
   'gpt-3.5-turbo': 'nvidia/nemotron-3-ultra-550b-a55b',
   'gpt-4': 'deepseek-ai/deepseek-v4-flash-0731',
@@ -36,12 +33,11 @@ app.get('/health', (req, res) => {
   res.json({ 
     status: 'ok', 
     service: 'OpenAI to NVIDIA NIM Proxy', 
-    reasoning_display: SHOW_REASONING,
-    thinking_mode: ENABLE_THINKING_MODE
+    reasoning_display: SHOW_REASONING
   });
 });
 
-// List models endpoint (OpenAI compatible)
+// List models endpoint
 app.get('/v1/models', (req, res) => {
   const models = Object.keys(MODEL_MAPPING).map(model => ({
     id: model,
@@ -56,7 +52,7 @@ app.get('/v1/models', (req, res) => {
   });
 });
 
-// Chat completions endpoint (main proxy)
+// Chat completions endpoint
 app.post('/v1/chat/completions', async (req, res) => {
   try {
     const { 
@@ -70,69 +66,52 @@ app.post('/v1/chat/completions', async (req, res) => {
       presence_penalty 
     } = req.body;
 
-    // 1. Defend against malformed pings or missing arrays
     if (!messages || !Array.isArray(messages)) {
       return res.status(400).json({
         error: { message: "Invalid request body or missing 'messages' array.", type: "invalid_request_error", code: 400 }
       });
     }
     
-    // Smart model selection with fallback
+    // Resolve NIM model identifier
     let nimModel = model ? MODEL_MAPPING[model] : undefined;
     if (!nimModel && model) {
-      try {
-        // Changed to use a separate variable to avoid shadowing the route's 'res' object
-        const verificationCheck = await axios.post(`${NIM_API_BASE}/chat/completions`, {
-          model: model,
-          messages: [{ role: 'user', content: 'test' }],
-          max_tokens: 1
-        }, {
-          headers: { 'Authorization': `Bearer ${NIM_API_KEY}`, 'Content-Type': 'application/json' },
-          validateStatus: (status) => status < 500
-        });
-        
-        if (verificationCheck.status >= 200 && verificationCheck.status < 300) {
-          nimModel = model;
-        }
-      } catch (e) {}
+      nimModel = model; // Direct pass-through if custom model string provided
     }
 
-    // Secondary fallback routine if the model isn't mapped or verified
     if (!nimModel) {
-      const modelLower = (model || '').toLowerCase();
-      if (modelLower.includes('gpt-4') || modelLower.includes('claude-opus') || modelLower.includes('405b')) {
-        nimModel = 'meta/llama-3.1-405b-instruct';
-      } else if (modelLower.includes('claude') || modelLower.includes('gemini') || modelLower.includes('70b')) {
-        nimModel = 'meta/llama-3.1-70b-instruct';
-      } else {
-        nimModel = 'meta/llama-3.1-8b-instruct';
-      }
+      nimModel = 'meta/llama-3.1-8b-instruct';
     }
     
-    // Prepare parameter overrides and dynamic configurations
-    let finalMessages = [...messages];
-    let finalTemperature = temperature;
-    let finalTopP = top_p;
-    let finalFrequencyPenalty = frequency_penalty;
-    let finalPresencePenalty = presence_penalty;
-    let finalRepetitionPenalty = undefined;
+    const isKimiModel = nimModel.includes('kimi-k3');
 
-    if (finalTemperature === undefined) finalTemperature = 0.6;
-    
-    // Transform OpenAI request to NIM format
+    // Clean and normalize incoming message array
+    const finalMessages = messages.map(msg => {
+      const cleanMsg = { role: msg.role, content: msg.content || '' };
+      // Preserve system/reasoning tags if passed from frontend
+      if (msg.reasoning_content) cleanMsg.reasoning_content = msg.reasoning_content;
+      return cleanMsg;
+    });
+
+    // Build model-compliant payload
     const nimRequest = {
       model: nimModel,
       messages: finalMessages,
-      temperature: finalTemperature,
-      top_p: finalTopP,
-      frequency_penalty: finalFrequencyPenalty,
-      presence_penalty: finalPresencePenalty,
-      max_tokens: max_tokens || 9024,
-      stream: stream || false,
-      ...(finalRepetitionPenalty && { repetition_penalty: finalRepetitionPenalty })
+      max_tokens: max_tokens || 4096,
+      stream: stream || false
     };
+
+    // Sanitize parameters for Kimi K3 vs Standard Models
+    if (isKimiModel) {
+      // Kimi K3 requires temperature 1.0 and rejects penalties
+      nimRequest.temperature = 1.0;
+    } else {
+      nimRequest.temperature = temperature !== undefined ? temperature : 0.6;
+      if (top_p !== undefined) nimRequest.top_p = top_p;
+      if (frequency_penalty !== undefined) nimRequest.frequency_penalty = frequency_penalty;
+      if (presence_penalty !== undefined) nimRequest.presence_penalty = presence_penalty;
+    }
     
-    // Make request to NVIDIA NIM API
+    // Dispatch request to NVIDIA NIM API
     const response = await axios.post(`${NIM_API_BASE}/chat/completions`, nimRequest, {
       headers: {
         'Authorization': `Bearer ${NIM_API_KEY}`,
@@ -150,7 +129,6 @@ app.post('/v1/chat/completions', async (req, res) => {
       let reasoningStarted = false;
       
       response.data.on('data', (chunk) => {
-        // 2. Encapsulate stream processing in its own try/catch to protect the core Node process
         try {
           buffer += chunk.toString();
           const lines = buffer.split('\n');
@@ -159,7 +137,7 @@ app.post('/v1/chat/completions', async (req, res) => {
           lines.forEach(line => {
             if (line.startsWith('data: ')) {
               if (line.includes('[DONE]')) {
-                res.write(line + '\n');
+                res.write('data: [DONE]\n\n');
                 return;
               }
               
@@ -171,7 +149,6 @@ app.post('/v1/chat/completions', async (req, res) => {
                   
                   if (SHOW_REASONING) {
                     let combinedContent = '';
-                    
                     if (reasoning && !reasoningStarted) {
                       combinedContent = '<think>\n' + reasoning;
                       reasoningStarted = true;
@@ -180,28 +157,21 @@ app.post('/v1/chat/completions', async (req, res) => {
                     }
                     
                     if (content && reasoningStarted) {
-                      combinedContent += '</think>\n\n' + content;
+                      combinedContent += '\n</think>\n\n' + content;
                       reasoningStarted = false;
                     } else if (content) {
                       combinedContent += content;
                     }
                     
-                    if (combinedContent) {
-                      data.choices[0].delta.content = combinedContent;
-                      delete data.choices[0].delta.reasoning_content;
-                    }
+                    data.choices[0].delta.content = combinedContent;
                   } else {
-                    if (content) {
-                      data.choices[0].delta.content = content;
-                    } else {
-                      data.choices[0].delta.content = '';
-                    }
-                    delete data.choices[0].delta.reasoning_content;
+                    data.choices[0].delta.content = content || '';
                   }
+                  delete data.choices[0].delta.reasoning_content;
                 }
                 res.write(`data: ${JSON.stringify(data)}\n\n`);
               } catch (e) {
-                res.write(line + '\n');
+                res.write(line + '\n\n');
               }
             }
           });
@@ -216,7 +186,7 @@ app.post('/v1/chat/completions', async (req, res) => {
         if (!res.headersSent) res.end();
       });
     } else {
-      // Transform NIM response to OpenAI format with reasoning
+      // Non-streaming response formatting
       const openaiResponse = {
         id: `chatcmpl-${Date.now()}`,
         object: 'chat.completion',
@@ -226,7 +196,7 @@ app.post('/v1/chat/completions', async (req, res) => {
           let fullContent = choice.message?.content || '';
           
           if (SHOW_REASONING && choice.message?.reasoning_content) {
-            fullContent = '<think>\n' + choice.message.reasoning_content + '\n</think>\n\n' + fullContent;
+            fullContent = `<think>\n${choice.message.reasoning_content}\n</think>\n\n${fullContent}`;
           }
           
           return {
@@ -238,31 +208,30 @@ app.post('/v1/chat/completions', async (req, res) => {
             finish_reason: choice.finish_reason
           };
         }),
-        usage: response.data.usage || {
-          prompt_tokens: 0,
-          completion_tokens: 0,
-          total_tokens: 0
-        }
+        usage: response.data.usage || { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 }
       };
       
       res.json(openaiResponse);
     }
     
   } catch (error) {
-    console.error('Proxy intercept error:', error.message);
+    const status = error.response?.status || 500;
+    const errorDetails = error.response?.data || error.message;
+    console.error(`Proxy Intercept Error [${status}]:`, JSON.stringify(errorDetails));
+
     if (!res.headersSent) {
-      res.status(error.response?.status || 500).json({
+      res.status(status).json({
         error: {
-          message: error.message || 'Internal proxy execution error',
+          message: typeof errorDetails === 'object' ? JSON.stringify(errorDetails) : errorDetails,
           type: 'invalid_request_error',
-          code: error.response?.status || 500
+          code: status
         }
       });
     }
   }
 });
 
-// Catch-all for unsupported endpoints
+// Catch-all route
 app.all('*', (req, res) => {
   res.status(404).json({
     error: {
@@ -273,12 +242,10 @@ app.all('*', (req, res) => {
   });
 });
 
-// 3. Prevent listener execution on Vercel deployment infrastructures
 if (!process.env.VERCEL) {
   app.listen(PORT, () => {
     console.log(`OpenAI to NVIDIA NIM Proxy running locally on port ${PORT}`);
   });
 }
 
-// Export the module app configuration natively for serverless environments
 module.exports = app;
