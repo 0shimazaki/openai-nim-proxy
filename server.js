@@ -63,7 +63,8 @@ app.post('/v1/chat/completions', async (req, res) => {
       stream,
       top_p,
       frequency_penalty,
-      presence_penalty 
+      presence_penalty,
+      reasoning_effort
     } = req.body;
 
     if (!messages || !Array.isArray(messages)) {
@@ -102,22 +103,25 @@ app.post('/v1/chat/completions', async (req, res) => {
 
     // Sanitize parameters for Kimi K3 vs Standard Models
     if (isKimiModel) {
-      // Kimi K3 requires temperature 1.0 and rejects penalties
+      // Kimi K3 requires temperature 1.0, rejects penalties, and supports reasoning effort
       nimRequest.temperature = 1.0;
+      nimRequest.reasoning_effort = reasoning_effort || 'low';
     } else {
       nimRequest.temperature = temperature !== undefined ? temperature : 0.6;
       if (top_p !== undefined) nimRequest.top_p = top_p;
       if (frequency_penalty !== undefined) nimRequest.frequency_penalty = frequency_penalty;
       if (presence_penalty !== undefined) nimRequest.presence_penalty = presence_penalty;
+      if (reasoning_effort !== undefined) nimRequest.reasoning_effort = reasoning_effort;
     }
     
-    // Dispatch request to NVIDIA NIM API
+    // Dispatch request to NVIDIA NIM API with extended timeout for deep reasoning
     const response = await axios.post(`${NIM_API_BASE}/chat/completions`, nimRequest, {
       headers: {
         'Authorization': `Bearer ${NIM_API_KEY}`,
         'Content-Type': 'application/json'
       },
-      responseType: stream ? 'stream' : 'json'
+      responseType: stream ? 'stream' : 'json',
+      timeout: 300000 // 5-minute timeout to prevent dropouts on heavy reasoning turns
     });
     
     if (stream) {
