@@ -54,6 +54,9 @@ app.get('/v1/models', (req, res) => {
 
 // Chat completions endpoint
 app.post('/v1/chat/completions', async (req, res) => {
+  // Prevent Node/Express socket drops during long reasoning phases
+  if (req.socket) req.socket.setTimeout(600000);
+
   try {
     const { 
       model, 
@@ -88,23 +91,32 @@ app.post('/v1/chat/completions', async (req, res) => {
     // Clean and normalize incoming message array
     const finalMessages = messages.map(msg => {
       const cleanMsg = { role: msg.role, content: msg.content || '' };
-      // Preserve system/reasoning tags if passed from frontend
-      if (msg.reasoning_content) cleanMsg.reasoning_content = msg.reasoning_content;
+      
+      // Preserve or extract reasoning_content required by Kimi K3 for multi-turn
+      if (msg.reasoning_content) {
+        cleanMsg.reasoning_content = msg.reasoning_content;
+      } else if (msg.role === 'assistant' && typeof msg.content === 'string' && msg.content.includes('<think>')) {
+        const match = msg.content.match(/<think>([\s\S]*?)<\/think>/);
+        if (match) {
+          cleanMsg.reasoning_content = match[1].trim();
+        }
+      }
+      
       return cleanMsg;
     });
 
-    // Build model-compliant payload
+    // Kimi K3 requires larger max_tokens so reasoning doesn't consume all output tokens
     const nimRequest = {
       model: nimModel,
       messages: finalMessages,
-      max_tokens: max_tokens || 4096,
+      max_tokens: max_tokens || (isKimiModel ? 16384 : 4096),
       stream: stream || false
     };
 
     // Sanitize parameters for Kimi K3 vs Standard Models
     if (isKimiModel) {
-      // Kimi K3 requires temperature 1.0, rejects penalties, and supports reasoning effort
       nimRequest.temperature = 1.0;
+      nimRequest.top_p = top_p !== undefined ? top_p : 0.95;
       nimRequest.reasoning_effort = reasoning_effort || 'low';
     } else {
       nimRequest.temperature = temperature !== undefined ? temperature : 0.6;
@@ -114,14 +126,15 @@ app.post('/v1/chat/completions', async (req, res) => {
       if (reasoning_effort !== undefined) nimRequest.reasoning_effort = reasoning_effort;
     }
     
-    // Dispatch request to NVIDIA NIM API with extended timeout for deep reasoning
+    // Dispatch request with explicit Accept headers for NIM streaming
     const response = await axios.post(`${NIM_API_BASE}/chat/completions`, nimRequest, {
       headers: {
         'Authorization': `Bearer ${NIM_API_KEY}`,
-        'Content-Type': 'application/json'
+        'Content-Type': 'application/json',
+        'Accept': stream ? 'text/event-stream' : 'application/json'
       },
       responseType: stream ? 'stream' : 'json',
-      timeout: 300000 // 5-minute timeout to prevent dropouts on heavy reasoning turns
+      timeout: 300000 // 5-minute timeout
     });
     
     if (stream) {
@@ -171,7 +184,11 @@ app.post('/v1/chat/completions', async (req, res) => {
                   } else {
                     data.choices[0].delta.content = content || '';
                   }
-                  delete data.choices[0].delta.reasoning_content;
+
+                  // Retain reasoning_content in delta if present so frontend can pass it back
+                  if (!SHOW_REASONING && reasoning) {
+                    data.choices[0].delta.reasoning_content = reasoning;
+                  }
                 }
                 res.write(`data: ${JSON.stringify(data)}\n\n`);
               } catch (e) {
@@ -203,12 +220,18 @@ app.post('/v1/chat/completions', async (req, res) => {
             fullContent = `<think>\n${choice.message.reasoning_content}\n</think>\n\n${fullContent}`;
           }
           
+          const messageObj = {
+            role: choice.message.role,
+            content: fullContent
+          };
+
+          if (choice.message?.reasoning_content) {
+            messageObj.reasoning_content = choice.message.reasoning_content;
+          }
+
           return {
             index: choice.index,
-            message: {
-              role: choice.message.role,
-              content: fullContent
-            },
+            message: messageObj,
             finish_reason: choice.finish_reason
           };
         }),
@@ -246,10 +269,12 @@ app.all('*', (req, res) => {
   });
 });
 
+let server;
 if (!process.env.VERCEL) {
-  app.listen(PORT, () => {
+  server = app.listen(PORT, () => {
     console.log(`OpenAI to NVIDIA NIM Proxy running locally on port ${PORT}`);
   });
+  server.timeout = 600000;
 }
 
 module.exports = app;
