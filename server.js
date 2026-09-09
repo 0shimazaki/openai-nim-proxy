@@ -10,7 +10,20 @@ app.use(cors());
 app.use(express.json({ limit: '50mb' }));
 
 const NIM_API_BASE = process.env.NIM_API_BASE || 'https://integrate.api.nvidia.com/v1';
-const NIM_API_KEY = process.env.NIM_API_KEY;
+
+// Support multiple NIM API keys, round-robin + automatic fallback on failure
+const NIM_API_KEYS = [process.env.NIM_API_KEY, process.env.NIM_API_KEY2].filter(Boolean);
+
+if (NIM_API_KEYS.length === 0) {
+  console.error('No NIM API keys configured! Set NIM_API_KEY and/or NIM_API_KEY2.');
+}
+
+let keyIndex = 0;
+function getNextKey() {
+  const key = NIM_API_KEYS[keyIndex % NIM_API_KEYS.length];
+  keyIndex = (keyIndex + 1) % NIM_API_KEYS.length;
+  return key;
+}
 
 // Display thinking tags in Chub AI chat UI
 const SHOW_REASONING = false; 
@@ -25,23 +38,31 @@ const MODEL_MAPPING = {
   'gemini-pro': 'moonshotai/kimi-k3' 
 };
 
-// Axios instance with 429 rate limit retry logic
+// Axios instance (per-key retry logic removed in favor of cross-key fallback below)
 const nimClient = axios.create({
   baseURL: NIM_API_BASE,
   timeout: 300000 // 5-minute timeout for deep reasoning
 });
 
-nimClient.interceptors.response.use(null, async (error) => {
-  const { config, response } = error;
-  if (response && response.status === 429 && (!config._retryCount || config._retryCount < 3)) {
-    config._retryCount = (config._retryCount || 0) + 1;
-    const delay = config._retryCount * 2000;
-    console.log(`[429 Rate Limit Hit] Retrying request in ${delay}ms (Attempt ${config._retryCount}/3)...`);
-    await new Promise(resolve => setTimeout(resolve, delay));
-    return nimClient(config);
+// Tries each configured key in turn; rotates on 429/401/403, bails immediately on other errors
+async function postWithKeyFallback(payload, config) {
+  let lastError;
+  for (let i = 0; i < NIM_API_KEYS.length; i++) {
+    const key = getNextKey();
+    try {
+      return await nimClient.post('/chat/completions', payload, {
+        ...config,
+        headers: { ...config.headers, 'Authorization': `Bearer ${key}` }
+      });
+    } catch (err) {
+      lastError = err;
+      const status = err.response?.status;
+      if (status !== 429 && status !== 401 && status !== 403) throw err;
+      console.log(`[Key Fallback] Key failed with status ${status}, trying next key...`);
+    }
   }
-  return Promise.reject(error);
-});
+  throw lastError;
+}
 
 app.get('/health', (req, res) => res.json({ status: 'ok', proxy: 'Chub AI to NVIDIA NIM' }));
 
@@ -103,9 +124,8 @@ app.post('/v1/chat/completions', async (req, res) => {
       if (req.body.top_p !== undefined) nimRequest.top_p = req.body.top_p;
     }
 
-    const response = await nimClient.post('/chat/completions', nimRequest, {
+    const response = await postWithKeyFallback(nimRequest, {
       headers: {
-        'Authorization': `Bearer ${NIM_API_KEY}`,
         'Content-Type': 'application/json',
         'Accept': stream ? 'text/event-stream' : 'application/json'
       },
