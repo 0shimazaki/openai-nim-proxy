@@ -44,6 +44,21 @@ const nimClient = axios.create({
   timeout: 300000 // 5-minute timeout for deep reasoning
 });
 
+// Shared secret required from clients (Chub AI / SillyTavern "API key" box)
+// Falls back to '123789ah' if PROXY_SECRET env var isn't set in Vercel
+const PROXY_SECRET = process.env.PROXY_SECRET || '123789ah';
+
+function checkAuth(req, res) {
+  const authHeader = req.headers['authorization'] || '';
+  const token = authHeader.replace(/^Bearer\s+/i, '');
+
+  if (token !== PROXY_SECRET) {
+    res.status(401).json({ error: { message: 'Invalid API key.', type: 'invalid_request_error' } });
+    return false;
+  }
+  return true;
+}
+
 // Tries each configured key in turn; rotates on 429/401/403, bails immediately on other errors
 async function postWithKeyFallback(payload, config) {
   let lastError;
@@ -77,6 +92,7 @@ app.get('/v1/models', (req, res) => {
 });
 
 app.post('/v1/chat/completions', async (req, res) => {
+  if (!checkAuth(req, res)) return;
   if (req.socket) req.socket.setTimeout(600000);
 
   try {
