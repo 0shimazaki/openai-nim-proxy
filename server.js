@@ -12,7 +12,7 @@ app.use(express.json({ limit: '50mb' }));
 const NIM_API_BASE = process.env.NIM_API_BASE || 'https://integrate.api.nvidia.com/v1';
 
 // Support multiple NIM API keys, round-robin + automatic fallback on failure
-const NIM_API_KEYS = [process.env.NIM_API_KEY, process.env.NIM_API_KEY2].filter(Boolean);
+const NIM_API_KEYS = [process.env.NIM_API_KEY, process.env.NIM_API_KEY2, process.env.NIM_API_KEY3].filter(Boolean);
 
 if (NIM_API_KEYS.length === 0) {
   console.error('No NIM API keys configured! Set NIM_API_KEY and/or NIM_API_KEY2.');
