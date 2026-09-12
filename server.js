@@ -58,6 +58,18 @@ const MODEL_MAPPING = {
 // substring check could accidentally match future/unrelated model names.
 const REASONING_MODELS = new Set(['moonshotai/kimi-k3']);
 
+// DeepSeek V4 and Gemma 4 don't use the standard `reasoning_effort` field at
+// all — NIM controls their thinking through a separate, non-standard
+// `chat_template_kwargs` object instead. Each entry below is the payload
+// that fully turns reasoning OFF for that model:
+//   - DeepSeek V4 Flash/Pro: three modes (None/High/Max). None = thinking: false.
+//   - Gemma 4: only two modes (on/off). Off = enable_thinking: false.
+const CHAT_TEMPLATE_REASONING_OFF = {
+  'deepseek-ai/deepseek-v4-flash-0731': { thinking: false },
+  'deepseek-ai/deepseek-v4-pro-0813': { thinking: false },
+  'google/gemma-4-31b-it': { enable_thinking: false }
+};
+
 // Axios instance (per-key retry logic removed in favor of cross-key fallback below)
 const nimClient = axios.create({
   baseURL: NIM_API_BASE,
@@ -267,6 +279,15 @@ app.post('/v1/chat/completions', async (req, res) => {
       nimRequest.max_tokens = req.body.max_tokens || 4096;
       if (req.body.temperature !== undefined) nimRequest.temperature = req.body.temperature;
       if (req.body.top_p !== undefined) nimRequest.top_p = req.body.top_p;
+
+      // Force reasoning off for models that gate it via chat_template_kwargs
+      // instead of the standard reasoning_effort field (DeepSeek V4, Gemma 4).
+      if (CHAT_TEMPLATE_REASONING_OFF[nimModel]) {
+        nimRequest.chat_template_kwargs = {
+          ...(nimRequest.chat_template_kwargs || {}),
+          ...CHAT_TEMPLATE_REASONING_OFF[nimModel]
+        };
+      }
     }
 
     const response = await postWithKeyFallback(nimRequest, {
