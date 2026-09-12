@@ -6,8 +6,22 @@ const axios = require('axios');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-app.use(cors());
 app.use(express.json({ limit: '50mb' }));
+
+// ---- CORS ----
+// If you set ALLOWED_ORIGINS (comma-separated) in your env vars, only those
+// origins can call this proxy from a browser. If you leave it unset, all
+// origins are allowed (same as before) so nothing breaks by default.
+const allowedOrigins = (process.env.ALLOWED_ORIGINS || '')
+  .split(',')
+  .map(o => o.trim())
+  .filter(Boolean);
+
+app.use(cors(
+  allowedOrigins.length > 0
+    ? { origin: allowedOrigins }
+    : {}
+));
 
 const NIM_API_BASE = process.env.NIM_API_BASE || 'https://integrate.api.nvidia.com/v1';
 
@@ -15,7 +29,7 @@ const NIM_API_BASE = process.env.NIM_API_BASE || 'https://integrate.api.nvidia.c
 const NIM_API_KEYS = [process.env.NIM_API_KEY, process.env.NIM_API_KEY2, process.env.NIM_API_KEY3].filter(Boolean);
 
 if (NIM_API_KEYS.length === 0) {
-  console.error('No NIM API keys configured! Set NIM_API_KEY and/or NIM_API_KEY2.');
+  console.error('FATAL: No NIM API keys configured! Set NIM_API_KEY and/or NIM_API_KEY2/3.');
 }
 
 let keyIndex = 0;
@@ -26,7 +40,8 @@ function getNextKey() {
 }
 
 // Display thinking tags in Chub AI chat UI
-const SHOW_REASONING = false; 
+// Can now be flipped via env var without redeploying code: SHOW_REASONING=true
+const SHOW_REASONING = process.env.SHOW_REASONING === 'true';
 
 const MODEL_MAPPING = {
   'gpt-3.5-turbo': 'nvidia/nemotron-3-ultra-550b-a55b',
@@ -35,8 +50,13 @@ const MODEL_MAPPING = {
   'gpt-4o': 'deepseek-ai/deepseek-v4-pro-0813',
   'claude-3-opus': 'google/gemma-4-31b-it',
   'claude-3-sonnet': 'minimaxai/minimax-m3',
-  'gemini-pro': 'moonshotai/kimi-k3' 
+  'gemini-pro': 'moonshotai/kimi-k3'
 };
+
+// Explicit list of models that need the special reasoning/thinking handling.
+// Safer than checking `.includes('kimi-k3')` on the model string, since that
+// substring check could accidentally match future/unrelated model names.
+const REASONING_MODELS = new Set(['moonshotai/kimi-k3']);
 
 // Axios instance (per-key retry logic removed in favor of cross-key fallback below)
 const nimClient = axios.create({
@@ -44,11 +64,23 @@ const nimClient = axios.create({
   timeout: 300000 // 5-minute timeout for deep reasoning
 });
 
-// Shared secret required from clients (Chub AI / SillyTavern "API key" box)
-// Falls back to '123789ah' if PROXY_SECRET env var isn't set in Vercel
-const PROXY_SECRET = process.env.PROXY_SECRET || '123789ah';
+// ---- Shared secret required from clients (Chub AI / SillyTavern "API key" box) ----
+// No more hardcoded fallback secret. If PROXY_SECRET isn't set in your Vercel
+// env vars, every request is rejected with a clear error instead of silently
+// accepting a publicly-known default password.
+const PROXY_SECRET = process.env.PROXY_SECRET;
 
 function checkAuth(req, res) {
+  if (!PROXY_SECRET) {
+    res.status(500).json({
+      error: {
+        message: 'Server misconfigured: PROXY_SECRET is not set.',
+        type: 'server_error'
+      }
+    });
+    return false;
+  }
+
   const authHeader = req.headers['authorization'] || '';
   const token = authHeader.replace(/^Bearer\s+/i, '');
 
@@ -61,6 +93,12 @@ function checkAuth(req, res) {
 
 // Tries each configured key in turn; rotates on 429/401/403, bails immediately on other errors
 async function postWithKeyFallback(payload, config) {
+  if (NIM_API_KEYS.length === 0) {
+    const err = new Error('No NIM API keys configured on the server.');
+    err.response = { status: 500, data: { error: err.message } };
+    throw err;
+  }
+
   let lastError;
   for (let i = 0; i < NIM_API_KEYS.length; i++) {
     const key = getNextKey();
@@ -79,7 +117,92 @@ async function postWithKeyFallback(payload, config) {
   throw lastError;
 }
 
-app.get('/health', (req, res) => res.json({ status: 'ok', proxy: 'Chub AI to NVIDIA NIM' }));
+// Some models (DeepSeek V4 Flash/Pro) don't send reasoning in a separate
+// `reasoning_content` field like Kimi K3 does — they embed <think>...</think>
+// tags directly inside the normal `content` text. The reasoning_content-based
+// suppression above never touches that, so this strips it too whenever
+// SHOW_REASONING is off, regardless of which model produced it.
+
+// For non-streamed responses we have the full string at once, so a simple
+// regex removal is enough.
+function stripThinkTagsFromText(text) {
+  if (!text) return text;
+  return text.replace(/<think>[\s\S]*?<\/think>/g, '').trim();
+}
+
+// For streamed responses, the <think>/</think> markers can be split across
+// two or more separate network chunks (e.g. one chunk ends in "<thi" and the
+// next starts with "nk>"). This factory returns a stateful function that
+// keeps a tiny buffer of "could still become a tag" text between calls, so a
+// split tag is still caught and removed correctly.
+function makeThinkStripper() {
+  let insideThink = false;
+  let carry = '';
+  const OPEN = '<think>';
+  const CLOSE = '</think>';
+
+  return function strip(chunkText) {
+    let text = carry + (chunkText || '');
+    carry = '';
+    let output = '';
+
+    while (text.length) {
+      if (!insideThink) {
+        const idx = text.indexOf('<');
+        if (idx === -1) {
+          output += text;
+          text = '';
+        } else {
+          output += text.slice(0, idx);
+          const remainder = text.slice(idx);
+          if (remainder.length < OPEN.length && OPEN.startsWith(remainder)) {
+            carry = remainder; // possible partial "<think>" split across chunks
+            text = '';
+          } else if (remainder.startsWith(OPEN)) {
+            insideThink = true;
+            text = remainder.slice(OPEN.length);
+          } else {
+            output += remainder[0];
+            text = remainder.slice(1);
+          }
+        }
+      } else {
+        const idx = text.indexOf('<');
+        if (idx === -1) {
+          text = ''; // still inside <think>, discard this piece
+        } else {
+          const remainder = text.slice(idx);
+          if (remainder.length < CLOSE.length && CLOSE.startsWith(remainder)) {
+            carry = remainder; // possible partial "</think>" split across chunks
+            text = '';
+          } else if (remainder.startsWith(CLOSE)) {
+            insideThink = false;
+            text = remainder.slice(CLOSE.length);
+          } else {
+            text = remainder.slice(1); // still inside <think>, discard
+          }
+        }
+      }
+    }
+
+    return output;
+  };
+}
+
+// Strips anything that looks like a key/token/secret out of error bodies
+// before they're sent back to the client, so a NIM error response can never
+// accidentally leak credentials to whoever is calling your proxy.
+function sanitizeError(errorDetails) {
+  let text = typeof errorDetails === 'object' ? JSON.stringify(errorDetails) : String(errorDetails);
+  text = text.replace(/(sk-|nvapi-)[a-zA-Z0-9\-_]+/g, '[REDACTED]');
+  return text;
+}
+
+app.get('/health', (req, res) => res.json({
+  status: NIM_API_KEYS.length > 0 ? 'ok' : 'misconfigured',
+  proxy: 'Chub AI to NVIDIA NIM',
+  keysConfigured: NIM_API_KEYS.length
+}));
 
 app.get('/v1/models', (req, res) => {
   const models = Object.keys(MODEL_MAPPING).map(model => ({
@@ -103,20 +226,26 @@ app.post('/v1/chat/completions', async (req, res) => {
     }
 
     let nimModel = model ? (MODEL_MAPPING[model] || model) : 'moonshotai/kimi-k3';
-    const isKimiModel = nimModel.includes('kimi-k3');
+    const isReasoningModel = REASONING_MODELS.has(nimModel);
 
     // Reconstruct message history to preserve reasoning content for Kimi K3
     const finalMessages = messages.map(msg => {
       const cleanMsg = { role: msg.role, content: msg.content || '' };
-      
-      if (msg.reasoning_content) {
-        cleanMsg.reasoning_content = msg.reasoning_content;
-      } else if (msg.role === 'assistant' && typeof msg.content === 'string' && msg.content.includes('<think>')) {
-        const match = msg.content.match(/<think>([\s\S]*?)<\/think>/);
-        if (match) {
-          cleanMsg.reasoning_content = match[1].trim();
-          cleanMsg.content = msg.content.replace(/<think>[\s\S]*?<\/think>/, '').trim();
+
+      try {
+        if (msg.reasoning_content) {
+          cleanMsg.reasoning_content = msg.reasoning_content;
+        } else if (msg.role === 'assistant' && typeof msg.content === 'string' && msg.content.includes('<think>')) {
+          const match = msg.content.match(/<think>([\s\S]*?)<\/think>/);
+          if (match) {
+            cleanMsg.reasoning_content = match[1].trim();
+            cleanMsg.content = msg.content.replace(/<think>[\s\S]*?<\/think>/, '').trim();
+          }
         }
+      } catch (parseErr) {
+        // If a malformed <think> tag ever shows up, fall back to the raw
+        // message instead of letting one bad entry break the whole request.
+        console.error('Message reasoning parse error, using raw content:', parseErr.message);
       }
       return cleanMsg;
     });
@@ -128,9 +257,9 @@ app.post('/v1/chat/completions', async (req, res) => {
       stream: Boolean(stream)
     };
 
-    if (isKimiModel) {
+    if (isReasoningModel) {
       // Force token budget high enough to handle thinking + response output
-      nimRequest.max_tokens = 16384; 
+      nimRequest.max_tokens = 16384;
       nimRequest.temperature = 1.0;
       nimRequest.reasoning_effort = reasoning_effort || 'low';
       // Strictly omit frequency_penalty, presence_penalty, repetition_penalty, min_p, top_k
@@ -155,6 +284,9 @@ app.post('/v1/chat/completions', async (req, res) => {
 
       let buffer = '';
       let reasoningStarted = false;
+      // One stripper instance per response, so its partial-tag memory
+      // persists correctly across all chunks of this single reply.
+      const stripInlineThink = makeThinkStripper();
 
       response.data.on('data', (chunk) => {
         try {
@@ -193,7 +325,12 @@ app.post('/v1/chat/completions', async (req, res) => {
 
                     data.choices[0].delta.content = combinedContent;
                   } else {
-                    data.choices[0].delta.content = content || '';
+                    // Handles both cases: models that never send inline
+                    // <think> tags (stripInlineThink passes text through
+                    // unchanged) and models like DeepSeek V4 that embed them
+                    // directly in `content` (stripInlineThink removes them,
+                    // even if a tag is split across this chunk and the next).
+                    data.choices[0].delta.content = stripInlineThink(content || '');
                   }
                   delete data.choices[0].delta.reasoning_content;
                 }
@@ -220,6 +357,11 @@ app.post('/v1/chat/completions', async (req, res) => {
           let fullContent = choice.message?.content || '';
           if (SHOW_REASONING && choice.message?.reasoning_content) {
             fullContent = `<think>\n${choice.message.reasoning_content}\n</think>\n\n${fullContent}`;
+          } else if (!SHOW_REASONING) {
+            // Some models (DeepSeek V4 Flash/Pro) embed <think>...</think>
+            // directly in the content string instead of a separate
+            // reasoning_content field. Strip it here too.
+            fullContent = stripThinkTagsFromText(fullContent);
           }
           return {
             index: choice.index,
@@ -240,7 +382,7 @@ app.post('/v1/chat/completions', async (req, res) => {
     if (!res.headersSent) {
       res.status(status).json({
         error: {
-          message: typeof errorDetails === 'object' ? JSON.stringify(errorDetails) : errorDetails,
+          message: sanitizeError(errorDetails),
           type: 'invalid_request_error',
           code: status
         }
