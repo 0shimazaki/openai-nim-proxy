@@ -44,11 +44,11 @@ function getNextKey() {
 const SHOW_REASONING = process.env.SHOW_REASONING === 'true';
 
 const MODEL_MAPPING = {
-  'gpt-3.5-turbo': 'nvidia/nemotron-3.5-lightning-30b-a3b',
+  'gpt-3.5-turbo': 'nvidia/nemotron-3-ultra-550b-a55b',
   'gpt-4': 'deepseek-ai/deepseek-v4-flash-0731',
-  'gpt-4-turbo': 'z-ai/glm-5.3',
+  'gpt-4-turbo': 'z-ai/glm-5.2',
   'gpt-4o': 'deepseek-ai/deepseek-v4-pro-0813',
-  'claude-3-opus': 'meta/muse-glimmer-30b',
+  'claude-3-opus': 'google/gemma-4-31b-it',
   'claude-3-sonnet': 'minimaxai/minimax-m3',
   'gemini-pro': 'moonshotai/kimi-k3'
 };
@@ -441,6 +441,17 @@ app.post('/v1/chat/completions', async (req, res) => {
                   }
                   delete data.choices[0].delta.reasoning_content;
                 }
+
+                // Some models send an extra chunk right before [DONE] that
+                // only carries token-usage stats, with an empty `choices`
+                // array (no [0] element at all). Clients like Chub/
+                // SillyTavern assume choices[0] always exists and crash
+                // trying to read `.delta` off it — so skip forwarding those
+                // instead of passing them through as-is.
+                if (Array.isArray(data.choices) && data.choices.length === 0) {
+                  return;
+                }
+
                 res.write(`data: ${JSON.stringify(data)}\n\n`);
               } catch (e) {
                 res.write(line + '\n\n');
