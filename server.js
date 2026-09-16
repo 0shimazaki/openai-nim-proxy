@@ -56,7 +56,7 @@ const MODEL_MAPPING = {
 // Explicit list of models that need the special reasoning/thinking handling.
 // Safer than checking `.includes('kimi-k3')` on the model string, since that
 // substring check could accidentally match future/unrelated model names.
-const REASONING_MODELS = new Set(['moonshotai/kimi-k3']);
+const REASONING_MODELS = new Set(['moonshotai/kimi-k3', 'z-ai/glm-5.3']);
 
 // DeepSeek V4 and Gemma 4 don't use the standard `reasoning_effort` field at
 // all — NIM controls their thinking through a separate, non-standard
@@ -67,8 +67,8 @@ const REASONING_MODELS = new Set(['moonshotai/kimi-k3']);
 const CHAT_TEMPLATE_REASONING_OFF = {
   'deepseek-ai/deepseek-v4-flash-0731': { thinking: false },
   'deepseek-ai/deepseek-v4-pro-0813': { thinking: false },
-  'google/gemma-4-31b-it': { enable_thinking: false },
-  'z-ai/glm-5.3': { enable_thinking: false }   // new
+  'google/gemma-4-31b-it': { enable_thinking: false }
+  // 'z-ai/glm-5.3' removed — uses reasoning_effort instead
 };
 
 // Axios instance (per-key retry logic removed in favor of cross-key fallback below)
