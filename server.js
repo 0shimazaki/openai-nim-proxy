@@ -67,7 +67,8 @@ const REASONING_MODELS = new Set(['moonshotai/kimi-k3']);
 const CHAT_TEMPLATE_REASONING_OFF = {
   'deepseek-ai/deepseek-v4-flash-0731': { thinking: false },
   'deepseek-ai/deepseek-v4-pro-0813': { thinking: false },
-  'google/gemma-4-31b-it': { enable_thinking: false }
+  'google/gemma-4-31b-it': { enable_thinking: false },
+  'z-ai/glm-5.3': { enable_thinking: false }   // new
 };
 
 // Axios instance (per-key retry logic removed in favor of cross-key fallback below)
