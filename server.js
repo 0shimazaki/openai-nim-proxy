@@ -45,11 +45,11 @@ const SHOW_REASONING = process.env.SHOW_REASONING === 'true';
 
 const MODEL_MAPPING = {
   'gpt-3.5-turbo': 'nvidia/nemotron-3-ultra-550b-a55b',
-  'gpt-4': 'deepseek-ai/deepseek-v4-flash-0731',
+  'gpt-4': 'deepseek-ai/deepseek-v4.1-flash',
   'gpt-4-turbo': 'z-ai/glm-5.3',
   'gpt-4o': 'deepseek-ai/deepseek-v4-pro-0813',
   'claude-3-opus': 'google/gemma-4-31b-it',
-  'claude-3-sonnet': 'minimaxai/minimax-m3',
+  'claude-3-sonnet': 'z-ai/glm-5.3-flash',
   'gemini-pro': 'moonshotai/kimi-k3'
 };
 
