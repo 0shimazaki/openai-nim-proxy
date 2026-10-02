@@ -56,7 +56,11 @@ const MODEL_MAPPING = {
 // Explicit list of models that need the special reasoning/thinking handling.
 // Safer than checking `.includes('kimi-k3')` on the model string, since that
 // substring check could accidentally match future/unrelated model names.
-const REASONING_MODELS = new Set(['moonshotai/kimi-k3', 'z-ai/glm-5.3']);
+const REASONING_MODELS = new Set([
+  'moonshotai/kimi-k3',
+  'z-ai/glm-5.3',
+  'z-ai/glm-5.3-flash'
+]);
 
 // DeepSeek V4 and Gemma 4 don't use the standard `reasoning_effort` field at
 // all — NIM controls their thinking through a separate, non-standard
@@ -66,6 +70,7 @@ const REASONING_MODELS = new Set(['moonshotai/kimi-k3', 'z-ai/glm-5.3']);
 //   - Gemma 4: only two modes (on/off). Off = enable_thinking: false.
 const CHAT_TEMPLATE_REASONING_OFF = {
   'deepseek-ai/deepseek-v4-flash-0731': { thinking: false },
+  'deepseek-ai/deepseek-v4.1-flash': { thinking: false },
   'deepseek-ai/deepseek-v4-pro-0813': { thinking: false },
   'google/gemma-4-31b-it': { enable_thinking: false }
   // 'z-ai/glm-5.3' removed — uses reasoning_effort instead
@@ -385,6 +390,15 @@ app.post('/v1/chat/completions', async (req, res) => {
       res.setHeader('Content-Type', 'text/event-stream');
       res.setHeader('Cache-Control', 'no-cache');
       res.setHeader('Connection', 'keep-alive');
+      res.setHeader('X-Accel-Buffering', 'no');
+      res.flushHeaders();
+
+      // Keepalive comments so clients/proxies don't treat a long silent
+      // "thinking" period as a dead connection.
+      const keepAlive = setInterval(() => {
+        if (!res.writableEnded) res.write(': keepalive\n\n');
+      }, 15000);
+      res.on('close', () => clearInterval(keepAlive));
 
       let buffer = '';
       let reasoningStarted = false;
@@ -465,6 +479,7 @@ app.post('/v1/chat/completions', async (req, res) => {
       });
 
       response.data.on('end', () => {
+        clearInterval(keepAlive);
         // Fallback in case the upstream stream closed without ever sending
         // a [DONE] line: make sure anything still buffered gets flushed.
         const trailing = stripInlineThink.flush();
@@ -473,7 +488,10 @@ app.post('/v1/chat/completions', async (req, res) => {
         }
         res.end();
       });
-      response.data.on('error', () => { if (!res.headersSent) res.end(); });
+      response.data.on('error', () => {
+        clearInterval(keepAlive);
+        if (!res.headersSent) res.end();
+      });
     } else {
       const openaiResponse = {
         id: `chatcmpl-${Date.now()}`,
@@ -502,6 +520,14 @@ app.post('/v1/chat/completions', async (req, res) => {
     }
 
   } catch (error) {
+    // With responseType: 'stream', error bodies arrive as a stream, so read
+    // it into a string first or the log below just shows unreadable output.
+    if (error.response?.data?.on) {
+      const chunks = [];
+      for await (const c of error.response.data) chunks.push(c);
+      error.response.data = Buffer.concat(chunks).toString();
+    }
+
     const status = error.response?.status || 500;
     const errorDetails = error.response?.data || error.message;
     console.error(`NIM Intercept Error [${status}]:`, JSON.stringify(errorDetails));
