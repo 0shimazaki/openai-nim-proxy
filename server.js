@@ -69,7 +69,7 @@ const REASONING_MODELS = new Set([
 // If NIM ever rejects "low" for Kimi K3, change its value to 'max' below.
 const FORCED_EFFORT = {
   'moonshotai/kimi-k3': 'low',
-  'z-ai/glm-5.3': 'low'
+  'z-ai/glm-5.3': 'high' // GLM 5.3 only supports low/high/max; "medium" would fall back to max
 };
 
 // DeepSeek V4 and Gemma 4 don't use the standard `reasoning_effort` field at
