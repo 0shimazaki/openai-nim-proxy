@@ -41,6 +41,7 @@ function getNextKey() {
 
 // Display thinking tags in Chub AI chat UI
 // Can now be flipped via env var without redeploying code: SHOW_REASONING=true
+// Defaults to false (reasoning is hidden from the chat).
 const SHOW_REASONING = process.env.SHOW_REASONING === 'true';
 
 const MODEL_MAPPING = {
@@ -61,6 +62,15 @@ const REASONING_MODELS = new Set([
   'z-ai/glm-5.3',
   'z-ai/glm-5.3-flash'
 ]);
+
+// Models that always get reasoning_effort forced to the lowest level
+// ("low"), ignoring whatever the client sends. Both of these models always
+// think, and GLM 5.3 defaults to "max" if no level is sent, so we pin it.
+// If NIM ever rejects "low" for Kimi K3, change its value to 'max' below.
+const FORCED_EFFORT = {
+  'moonshotai/kimi-k3': 'low',
+  'z-ai/glm-5.3': 'low'
+};
 
 // DeepSeek V4 and Gemma 4 don't use the standard `reasoning_effort` field at
 // all — NIM controls their thinking through a separate, non-standard
@@ -361,7 +371,9 @@ app.post('/v1/chat/completions', async (req, res) => {
       // Force token budget high enough to handle thinking + response output
       nimRequest.max_tokens = 16384;
       nimRequest.temperature = 1.0;
-      nimRequest.reasoning_effort = reasoning_effort || 'low';
+      // Kimi K3 and GLM 5.3 are pinned to the lowest effort level;
+      // other reasoning models honor the client's value (default "low").
+      nimRequest.reasoning_effort = FORCED_EFFORT[nimModel] || reasoning_effort || 'low';
       // Strictly omit frequency_penalty, presence_penalty, repetition_penalty, min_p, top_k
     } else {
       nimRequest.max_tokens = req.body.max_tokens || 4096;
