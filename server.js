@@ -44,13 +44,13 @@ function getNextKey() {
 const SHOW_REASONING = process.env.SHOW_REASONING === 'true';
 
 const MODEL_MAPPING = {
-  'gpt-3.5-turbo': 'nvidia/nemotron-3-ultra-550b-a55b',
+  'gpt-3.5-turbo': 'nvidia/nemotron-3.5-super-vl-120b-a12b',
   'gpt-4': 'deepseek-ai/deepseek-v4.1-flash',
   'gpt-4-turbo': 'z-ai/glm-5.3',
   'gpt-4o': 'stepfun-ai/step-5-preview',
   'claude-3-opus': 'google/gemma-4-31b-it',
   'claude-3-sonnet': 'z-ai/glm-5.3-flash',
-  'gemini-pro': 'moonshotai/kimi-k3'
+  'gemini-pro': 'meta/muse-glimmer-30b'
 };
 
 // Explicit list of models that need the special reasoning/thinking handling.
