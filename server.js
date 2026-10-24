@@ -44,7 +44,7 @@ function getNextKey() {
 const SHOW_REASONING = process.env.SHOW_REASONING === 'true';
 
 const MODEL_MAPPING = {
-  'gpt-3.5-turbo': 'nvidia/nemotron-3.5-super-vl-120b-a12b',
+  'gpt-3.5-turbo': 'minimaxai/minimax-m3.1-flash',
   'gpt-4': 'deepseek-ai/deepseek-v4.1-flash',
   'gpt-4-turbo': 'z-ai/glm-5.3',
   'gpt-4o': 'stepfun-ai/step-5-preview',
