@@ -46,7 +46,7 @@ const MODEL_MAPPING = {
   'gpt-4o': 'stepfun-ai/step-5-preview',
   'claude-3-opus': 'google/gemma-4-31b-it',
   'claude-3-sonnet': 'z-ai/glm-5.3-flash',
-  'gemini-pro': 'mistralai/mistral-large-4-1t-a52b'
+  'kimi-k3.1-pro': 'kimi-k3.1-pro'
 };
 
 // Explicit list of models that use the standard `reasoning_effort` field.
