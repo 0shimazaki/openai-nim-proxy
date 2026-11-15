@@ -44,7 +44,7 @@ const MODEL_MAPPING = {
   'gpt-4': 'deepseek-ai/deepseek-v4.1-flash',
   'gpt-4-turbo': 'z-ai/glm-5.3',
   'gpt-4o': 'stepfun-ai/step-5-preview',
-  'claude-3-opus': 'google/gemma-4-31b-it',
+  'gemma-4-31b': 'google/gemma-4-31b-it',
   'claude-3-sonnet': 'z-ai/glm-5.3-flash',
   'kimi-k3.1-pro': 'kimi-k3.1-pro'
 };
